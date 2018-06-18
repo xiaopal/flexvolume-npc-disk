@@ -11,7 +11,7 @@ export SCRIPT_DIR="$(cd "$(dirname ${BASH_SOURCE[0]})"; pwd)" \
 	NPC_API_REGION="$(jq -r '.api_region//.region//empty' "$NPC_API_CONFIG")" && [ ! -z "$NPC_API_REGION" ] && export NPC_API_REGION
 } 
 
-[ ! -z "$NPC_DISK_LOG" ] && exec 2>>"${NPC_DISK_LOG}"
+exec 2>>"${NPC_DISK_LOG:-/dev/null}"
 
 jq() {
 	"$SCRIPT_DIR/jq" "$@"
