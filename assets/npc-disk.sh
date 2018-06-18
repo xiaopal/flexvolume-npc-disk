@@ -4,6 +4,13 @@ export SCRIPT_DIR="$(cd "$(dirname ${BASH_SOURCE[0]})"; pwd)" \
 	OPTION_FS_TYPE="kubernetes.io/fsType" \
 	OPTION_VOLUME_NAME="kubernetes.io/pvOrVolumeName"
 
+[ ! -z "$NPC_API_CONFIG" ] && [ -f "$NPC_API_CONFIG" ] && {
+	NPC_API_KEY="$(jq -r '.api_key//.app_key//empty' "$NPC_API_CONFIG")" && [ ! -z "$NPC_API_KEY" ] && export NPC_API_KEY
+	NPC_API_SECRET="$(jq -r '.api_secret//.app_secret//empty' "$NPC_API_CONFIG")" && [ ! -z "$NPC_API_SECRET" ] && export NPC_API_SECRET
+	NPC_API_ENDPOINT="$(jq -r '.api_endpoint//.endpoint//empty' "$NPC_API_CONFIG")" && [ ! -z "$NPC_API_ENDPOINT" ] && export NPC_API_ENDPOINT
+	NPC_API_REGION="$(jq -r '.api_region//.region//empty' "$NPC_API_CONFIG")" && [ ! -z "$NPC_API_REGION" ] && export NPC_API_REGION
+} 
+
 [ ! -z "$NPC_DISK_LOG" ] && exec 2>>"${NPC_DISK_LOG}"
 
 jq() {
