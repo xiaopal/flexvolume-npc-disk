@@ -2,11 +2,11 @@
 - hosts: localhost
   gather_facts: no
   vars:
-    plugin_dir: '/plugins-exec/npc~disk/disk'
+    plugin_dir: '/plugins-exec/npc~disk'
   tasks:
     - file: state=directory path='{{plugin_dir}}'
     - copy: src={{item}} dest={{plugin_dir}} mode='0755'
       with_items: 
         - /usr/bin/jq
         - /usr/npc-shell/npc-shell.sh
-        - npc-disk.sh
+    - copy: src=npc-disk.sh dest={{plugin_dir}}/disk mode='0755'
