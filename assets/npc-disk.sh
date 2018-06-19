@@ -32,6 +32,9 @@ node_instance(){
 }
 
 do_init() {
+	[ -x /usr/bin/curl ] || {
+		apt-get update && apt-get install -y curl
+	}
 	jq -nc '{status:"Success", capabilities: {attach: true}}'	
 }
 
