@@ -31,12 +31,17 @@ node_instance(){
 
 do_init() {
 	[ -x /usr/bin/curl ] || ( apt-get update && apt-get install -y curl ) >&2
+	kubectl get node "$HOSTNAME" -o json | jq -e '.status.capacity["flexvolume.npc-disk/mount"]' >/dev/null || (
+		exec 100>"$SCRIPT_DIR/init.lock" && flock 100
+		kubectl get node "$HOSTNAME" -o json | jq -e '.status.capacity["flexvolume.npc-disk/mount"]' >/dev/null || {
+			kubectl proxy -p 8888 & local KUBE_PROXY="$!" && sleep 1s
+			curl -sS -H "Content-Type: application/json-patch+json" -X PATCH \
+				-d '[{"op": "add", "path": "/status/capacity/flexvolume.npc-disk~1mount", "value": 3}]' \
+				"http://127.0.0.1:8888/api/v1/nodes/$HOSTNAME/status" | \
+				log "PATCH $HOSTNAME flexvolume.npc-disk/mount=$(jq -r '.status.capacity["flexvolume.npc-disk/mount"]')"
+			kill -TERM "$KUBE_PROXY" && wait
+		}>&2 ) 
 	jq -nc '{status:"Success", capabilities: {attach: true}}'	
-}
-
-do_getvolumename() {
-	local DISK_NAME="$(jq -r '.["name"]//(.[env.OPTION_VOLUME_NAME]//empty|"flexvol-\(.)")'<<<"$1")" && [ ! -z "$DISK_NAME" ] || return 2
-	DISK_NAME="$DISK_NAME" jq -nc '{status:"Success", volumeName: env.DISK_NAME}'
 }
 
 find_disk(){
@@ -53,7 +58,10 @@ find_or_create_disk(){
 	[ ! -z "$DISK_NAME" ] && [ ! -z "$OPTIONS" ] && [ ! -z "$INSTANCE" ] || return 2
 	local DISK_ID="$(jq -r '.["id"]//empty'<<<"$OPTIONS")" && [ ! -z "$DISK_ID" ] || {
 		DISK_ID="$(find_disk "$DISK_NAME" "$INSTANCE")" && [ ! -z "$DISK_ID" ] || {
-			local CREATE_DISK="$(jq --arg name "$DISK_NAME" --argjson instance "$INSTANCE" -c '{
+			local DISK_CAPACITY="$(jq '.capacity//empty'<<<"$OPTIONS")"
+			[ ! -z "$DISK_CAPACITY" ] || DISK_CAPACITY="$(kubectl get pv "$DISK_NAME" -o json | jq -r '.spec.capacity.storage//empty')"
+			[ ! -z "$DISK_CAPACITY" ] || DISK_CAPACITY="10G"
+			local CREATE_DISK="$(jq --arg name "$DISK_NAME" --arg capacity "$DISK_CAPACITY" --argjson instance "$INSTANCE" -c '{
 				volume_name: $name,
 				az_name: (.zone//.az//$instance.zone),
 				type: (if .type then ({
@@ -62,7 +70,7 @@ find_or_create_disk(){
 						CloudSas:"C_SAS"
 					})[.type]//.type else .type end),
 				format: "Raw",
-				size: (.capacity//"10G"|sub("[Gg]$"; "") | tonumber/10 | if . > floor then floor + 1 else . end * 10)
+				size: ($capacity|sub("[Gg]i?$"; "") | tonumber/10 | if . > floor then floor + 1 else . end * 10)
 			}|with_entries(select(.value))'<<<"$OPTIONS")"
 			DISK_ID="$(npc api 'json.id//empty' POST "/api/v1/cloud-volumes" "$CREATE_DISK")" && [ ! -z "$DISK_ID" ] || return 2
 		}
@@ -99,7 +107,7 @@ wait_disk(){
 
 do_attach() {
 	local OPTIONS="$1" NODE="$2" && [ ! -z "$NODE" ] || return 2
-	local DISK_NAME="$(jq -r '.["name"]//(.[env.OPTION_VOLUME_NAME]//empty|"flexvol-\(.)")'<<<"$OPTIONS")" NODE_INSTANCE="$(node_instance "$NODE")"
+	local DISK_NAME="$(jq -r '.[env.OPTION_VOLUME_NAME]//empty'<<<"$OPTIONS")" NODE_INSTANCE="$(node_instance "$NODE")"
 	[ ! -z "$DISK_NAME" ] && [ ! -z "$NODE_INSTANCE" ] || return 2
 	local DISK_ID DISK_UUID ATTACHED_INSTANCE_ID
 	read -r DISK_NAME DISK_ID DISK_UUID ATTACHED_INSTANCE_ID <<<"$(find_or_create_disk "$DISK_NAME" "$OPTIONS" "$NODE_INSTANCE")" && [ ! -z "$DISK_ID" ] || {
