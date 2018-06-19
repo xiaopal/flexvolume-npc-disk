@@ -11,8 +11,6 @@ export SCRIPT_DIR="$(cd "$(dirname ${BASH_SOURCE[0]})"; pwd)" \
 	NPC_API_REGION="$(jq -r '.api_region//.region//empty' "$NPC_API_CONFIG")" && [ ! -z "$NPC_API_REGION" ] && export NPC_API_REGION
 } 
 
-exec 2>>"${NPC_DISK_LOG:-/dev/null}"
-
 jq() {
 	"$SCRIPT_DIR/jq" "$@"
 }
@@ -46,7 +44,7 @@ find_or_create_disk(){
 	[ ! -z "$DISK_NAME" ] && [ ! -z "$OPTIONS" ] && [ ! -z "$INSTANCE" ] || return 2
 	local DISK_ID="$(jq -r '.["id"]//empty'<<<"$OPTIONS")"
 	[ ! -z "$DISK_ID" ] || {
-		local ZONE="$(jq -r .zone <<<"$INSTANCE")"
+		local ZONE="$(jq -r '.zone//empty' <<<"$INSTANCE")"
 		DISK_ID="$(export LOOKUP_NAME="$DISK_NAME"
 			npc api2 'json.DiskCxts[]|select(.DiskName == env.LOOKUP_NAME)|.DiskId//empty' \
 				POST "/ncv?Version=2017-12-28&Action=ListDisk${ZONE:+&ZoneId=$ZONE}" \
@@ -105,7 +103,10 @@ do_attach() {
 		jq -nc '{status:"Failure", message:"Failed to create disk"}'
 		return 1
 	}
-	local INSTANCE_ID="$(jq -r '.id'<<<"$NODE_INSTANCE")"
+	local INSTANCE_ID="$(jq -r '.id//empty'<<<"$NODE_INSTANCE")" && [ ! -z "$INSTANCE_ID" ] || {
+		jq -nc '{status:"Failure", message:"instance id not labeled"}'
+		return 1
+	}
 	[ -z "$ATTACHED_INSTANCE_ID" ] || [ "$ATTACHED_INSTANCE_ID" == "$INSTANCE_ID" ] || {
 		jq -nc '{status:"Failure", message:"Disk already attached"}'
 		return 1
@@ -181,20 +182,22 @@ do_unmountdevice() {
 	jq -nc '{status:"Success"}'
 }
 
-log "$@"
-if ACTION="do_$1" && shift && declare -F "$ACTION" >/dev/null; then
-	"$ACTION" "$@" || {
-		case "$?" in
-		1)
-			:
-			;;
-		*)
-			jq -nc '{status:"Failure", message:"Something wrong"}'
-			;;
-		esac
+{
+	log "$@"
+	if ACTION="do_$1" && shift && declare -F "$ACTION" >/dev/null; then
+		"$ACTION" "$@" || {
+			case "$?" in
+			1)
+				:
+				;;
+			*)
+				jq -nc '{status:"Failure", message:"Something wrong"}'
+				;;
+			esac
+			exit 1
+		}
+	else
+		jq -nc '{status:"Not supported"}'
 		exit 1
-	}
-else
-	jq -nc '{status:"Not supported"}'
-	exit 1
-fi
+	fi
+} 2>>"${NPC_DISK_LOG:-/dev/null}"
