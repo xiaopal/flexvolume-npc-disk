@@ -35,21 +35,24 @@ do_init() {
 }
 
 do_getvolumename() {
-	local VOLUME_NAME="$(jq -r '.[env.OPTION_VOLUME_NAME]//empty'<<<"$1")" && [ ! -z "$VOLUME_NAME" ] || return 2
-	VOLUME_NAME="$VOLUME_NAME" jq -nc '{status:"Success", volumeName: env.VOLUME_NAME}'
+	local DISK_NAME="$(jq -r '.["name"]//(.[env.OPTION_VOLUME_NAME]//empty|"flexvol-\(.)")'<<<"$1")" && [ ! -z "$DISK_NAME" ] || return 2
+	DISK_NAME="$DISK_NAME" jq -nc '{status:"Success", volumeName: env.DISK_NAME}'
+}
+
+find_disk(){
+	local DISK_NAME="$1" INSTANCE="$2" && [ ! -z "$DISK_NAME" ] || return 2
+	local ZONE="$([ ! -z "$INSTANCE" ] && jq -r '.zone//empty' <<<"$INSTANCE")"
+	(export LOOKUP_NAME="$DISK_NAME"
+		npc api2 'json.DiskCxts[]|select(.DiskName == env.LOOKUP_NAME)|.DiskId//empty' \
+			POST "/ncv?Version=2017-12-28&Action=ListDisk${ZONE:+&ZoneId=$ZONE}" \
+			"$(jq -n '{ VolumeMatchPattern:{ volumeNameList:[env.LOOKUP_NAME], volumeScopeList:["NVM"] }}')") || return 2
 }
 
 find_or_create_disk(){
-	local DISK_NAME="$1" OPTIONS="$2" INSTANCE="$3" DISK_ID 
+	local DISK_NAME="$1" OPTIONS="$2" INSTANCE="$3" 
 	[ ! -z "$DISK_NAME" ] && [ ! -z "$OPTIONS" ] && [ ! -z "$INSTANCE" ] || return 2
-	local DISK_ID="$(jq -r '.["id"]//empty'<<<"$OPTIONS")"
-	[ ! -z "$DISK_ID" ] || {
-		local ZONE="$(jq -r '.zone//empty' <<<"$INSTANCE")"
-		DISK_ID="$(export LOOKUP_NAME="$DISK_NAME"
-			npc api2 'json.DiskCxts[]|select(.DiskName == env.LOOKUP_NAME)|.DiskId//empty' \
-				POST "/ncv?Version=2017-12-28&Action=ListDisk${ZONE:+&ZoneId=$ZONE}" \
-				"$(jq -n '{ VolumeMatchPattern:{ volumeNameList:[env.LOOKUP_NAME], volumeScopeList:["NVM"] }}')")"
-		[ ! -z "$DISK_ID" ] || {
+	local DISK_ID="$(jq -r '.["id"]//empty'<<<"$OPTIONS")" && [ ! -z "$DISK_ID" ] || {
+		DISK_ID="$(find_disk "$DISK_NAME" "$INSTANCE")" && [ ! -z "$DISK_ID" ] || {
 			local CREATE_DISK="$(jq --arg name "$DISK_NAME" --argjson instance "$INSTANCE" -c '{
 				volume_name: $name,
 				az_name: (.zone//.az//$instance.zone),
@@ -76,6 +79,7 @@ wait_disk(){
 			else "ok \(.name) \(.id) \(.volume_uuid) \(.service_name//"")"
 			end' GET "/api/v1/cloud-volumes/$DISK_ID") && case "$WAIT_STATUS" in
 			ok)
+				log "disk: $WAIT_RESULT"
 				echo "$WAIT_RESULT"; return 0
 				;;
 			wait)
@@ -95,12 +99,11 @@ wait_disk(){
 
 do_attach() {
 	local OPTIONS="$1" NODE="$2" && [ ! -z "$NODE" ] || return 2
-	local VOLUME_NAME="$(jq -r '.[env.OPTION_VOLUME_NAME]//empty'<<<"$OPTIONS")" NODE_INSTANCE="$(node_instance "$NODE")"
-	[ ! -z "$VOLUME_NAME" ] && [ ! -z "$NODE_INSTANCE" ] || return 2
-	local DISK_NAME="$(jq -r '.["name"]//empty'<<<"$OPTIONS")" DISK_ID DISK_UUID ATTACHED_INSTANCE_ID
-	[ ! -z "$DISK_NAME" ] || DISK_NAME="flexvol-$VOLUME_NAME"
+	local DISK_NAME="$(jq -r '.["name"]//(.[env.OPTION_VOLUME_NAME]//empty|"flexvol-\(.)")'<<<"$OPTIONS")" NODE_INSTANCE="$(node_instance "$NODE")"
+	[ ! -z "$DISK_NAME" ] && [ ! -z "$NODE_INSTANCE" ] || return 2
+	local DISK_ID DISK_UUID ATTACHED_INSTANCE_ID
 	read -r DISK_NAME DISK_ID DISK_UUID ATTACHED_INSTANCE_ID <<<"$(find_or_create_disk "$DISK_NAME" "$OPTIONS" "$NODE_INSTANCE")" && [ ! -z "$DISK_ID" ] || {
-		jq -nc '{status:"Failure", message:"Failed to create disk"}'
+		jq -nc '{status:"Failure", message:"Failed to find/create disk"}'
 		return 1
 	}
 	local INSTANCE_ID="$(jq -r '.id//empty'<<<"$NODE_INSTANCE")" && [ ! -z "$INSTANCE_ID" ] || {
@@ -122,15 +125,19 @@ do_attach() {
 }
 
 do_detach() {
-	local DEVICE="$1" NODE="$2" DISK_NAME DISK_ID DISK_UUID ATTACHED_INSTANCE_ID
-	IFS=':' read -r DISK_NAME DISK_ID DISK_UUID ATTACHED_INSTANCE_ID<<<"$DEVICE" && [ ! -z "$DISK_ID" ] || return 2
-	read -r DISK_NAME DISK_ID DISK_UUID ATTACHED_INSTANCE_ID <<<"$(wait_disk "$DISK_ID")" && [ ! -z "$ATTACHED_INSTANCE_ID" ] && {
-		npc api2 GET "/nvm?Action=DetachDisk&Version=2017-12-14&InstanceId=$ATTACHED_INSTANCE_ID&DiskId=$DISK_ID" >&2 || {
-			jq -nc '{status:"Failure", message:"Failed to attach disk"}'
-			return 1
-		}
+	local DISK_NAME="$1" NODE_INSTANCE="$(node_instance "$2")" && [ ! -z "$DISK_NAME" ] && [ ! -z "$NODE_INSTANCE" ] || return 2
+	local INSTANCE_ID="$(jq -r '.id//empty'<<<"$NODE_INSTANCE")" ATTACHED_INSTANCE_ID && [ ! -z "$INSTANCE_ID" ] || {
+		jq -nc '{status:"Failure", message:"instance id not labeled"}'
+		return 1
 	}
-	jq -nc '{status:"Success"}'	
+	local DISK_ID="$(find_disk "$DISK_NAME" "$NODE_INSTANCE")" && [ ! -z "$DISK_ID" ] && \
+		read -r _ _ _ ATTACHED_INSTANCE_ID <<<"$(wait_disk "$DISK_ID")" && [ "$ATTACHED_INSTANCE_ID" == "$INSTANCE_ID" ] && {
+			npc api2 GET "/nvm?Action=DetachDisk&Version=2017-12-14&InstanceId=$ATTACHED_INSTANCE_ID&DiskId=$DISK_ID" >&2 || {
+				jq -nc '{status:"Failure", message:"Failed to detach disk"}'
+				return 1
+			}
+		}
+	jq -nc '{status:"Success"}'
 }
 
 do_waitforattach() {
@@ -164,20 +171,30 @@ do_mountdevice() {
 		done < <(lsblk -o 'TYPE,NAME,UUID,FSTYPE,MOUNTPOINT' -bdsrn | tr ' ' ',' | grep '^disk,')
 		[ ! -z "$FOUND_MNT" ] || {
 			[ ! -z "$FOUND_FSTYPE" ] || {
-				[ ! -z "$FOUND_DEVICE" ] || return 2
-				FOUND_FSTYPE="$(jq -r '.[env.OPTION_FS_TYPE]//"ext4"'<<<"$OPTIONS")"
-				mkfs -t "$FOUND_FSTYPE" -U "$DISK_UUID" "$FOUND_DEVICE" >&2 || return 2
+				[ ! -z "$FOUND_DEVICE" ] || {
+					jq -nc '{status:"Failure", message:"device not found"}'
+					return 1
+				}
+				FOUND_FSTYPE="$(jq -r '.[env.OPTION_FS_TYPE]//empty'<<<"$OPTIONS")"
+				mkfs -t "${FOUND_FSTYPE:-ext4}" -U "$DISK_UUID" "$FOUND_DEVICE" >&2 || {
+					jq -nc '{status:"Failure", message:"failed to mkfs"}'
+					return 1
+				}
 			}
-			mkdir -p "$MOUNTPATH" >&2 && mount -t "$FOUND_FSTYPE" "UUID=$DISK_UUID" "$MOUNTPATH" >&2 || return 2
+			mkdir -p "$MOUNTPATH" >&2 && mount -t "${FOUND_FSTYPE:-ext4}" "UUID=$DISK_UUID" "$MOUNTPATH" >&2 || {
+				jq -nc '{status:"Failure", message:"failed to mount device"}'
+				return 1
+			}
 		}
 	}
 	jq -nc '{status:"Success"}'
 }
 
 do_unmountdevice() {
-	local MOUNTPATH="$1" DEVICE="$2"
-	mountpoint -q "$MOUNTPATH" && {
-		umount ${MOUNTPATH} >&2 || return 2
+	local MOUNTPATH="$1"
+	! mountpoint -q "$MOUNTPATH" || umount ${MOUNTPATH} >&2 || {
+		jq -nc '{status:"Failure", message:"failed to mount device"}'
+		return 1
 	}
 	jq -nc '{status:"Success"}'
 }
