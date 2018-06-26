@@ -2,7 +2,9 @@
 
 export SCRIPT_DIR="$(cd "$(dirname ${BASH_SOURCE[0]})"; pwd)" \
 	OPTION_FS_TYPE="kubernetes.io/fsType" \
-	OPTION_VOLUME_NAME="kubernetes.io/pvOrVolumeName"
+	OPTION_VOLUME_NAME="kubernetes.io/pvOrVolumeName" \
+	NPC_DISK_RESOURCE="${NPC_DISK_RESOURCE:-flexvolume.npc-disk/mount}" \
+	NPC_DISK_RESOURCE_CAPACITY="$NPC_DISK_RESOURCE_CAPACITY"
 
 [ ! -z "$NPC_API_CONFIG" ] && [ -f "$NPC_API_CONFIG" ] && {
 	NPC_API_KEY="$(jq -r '.api_key//.app_key//empty' "$NPC_API_CONFIG")" && [ ! -z "$NPC_API_KEY" ] && export NPC_API_KEY
@@ -31,16 +33,21 @@ node_instance(){
 
 do_init() {
 	[ -x /usr/bin/curl ] || ( apt-get update && apt-get install -y curl ) >&2
-	kubectl get node "$HOSTNAME" -o json | jq -e '.status.capacity["flexvolume.npc-disk/mount"]' >/dev/null || (
-		exec 100>"$SCRIPT_DIR/init.lock" && flock 100
-		kubectl get node "$HOSTNAME" -o json | jq -e '.status.capacity["flexvolume.npc-disk/mount"]' >/dev/null || {
-			kubectl proxy -p 8888 & local KUBE_PROXY="$!" && sleep 1s
-			curl -sS -H "Content-Type: application/json-patch+json" -X PATCH \
-				-d '[{"op": "add", "path": "/status/capacity/flexvolume.npc-disk~1mount", "value": 3}]' \
-				"http://127.0.0.1:8888/api/v1/nodes/$HOSTNAME/status" | \
-				log "PATCH $HOSTNAME flexvolume.npc-disk/mount=$(jq -r '.status.capacity["flexvolume.npc-disk/mount"]')"
-			kill -TERM "$KUBE_PROXY" && wait
-		}>&2 ) 
+	[ ! -z "$NPC_DISK_RESOURCE_CAPACITY" ] && {
+		kubectl get node "$HOSTNAME" -o json | jq -e '.status.capacity[env.NPC_DISK_RESOURCE]' >/dev/null || (
+			exec 100>"$SCRIPT_DIR/init.lock" && flock 100
+			kubectl get node "$HOSTNAME" -o json | jq -e '.status.capacity[env.NPC_DISK_RESOURCE]' >/dev/null || {
+				kubectl proxy -p 8888 & local KUBE_PROXY="$!" && sleep 1s
+				curl -sS -H "Content-Type: application/json-patch+json" -X PATCH \
+					-d "$(jq -nc '[{
+						op: "add", 
+						path: "/status/capacity/\(env.NPC_DISK_RESOURCE|gsub("/";"~1"))", 
+						value: (env.NPC_DISK_RESOURCE_CAPACITY|tonumber) }]')" \
+					"http://127.0.0.1:8888/api/v1/nodes/$HOSTNAME/status" | \
+					log "PATCH $HOSTNAME $NPC_DISK_RESOURCE=$(jq -r '.status.capacity[env.NPC_DISK_RESOURCE]')"
+				kill -TERM "$KUBE_PROXY" && wait
+			}>&2 )
+	}
 	jq -nc '{status:"Success", capabilities: {attach: true}}'	
 }
 
@@ -225,4 +232,8 @@ do_unmountdevice() {
 		jq -nc '{status:"Not supported"}'
 		exit 1
 	fi
-} 2>>"${NPC_DISK_LOG:-/dev/null}"
+} 2> >( if [ ! -z "$NPC_DISK_SYSLOG" ]; then
+		systemd-cat -t "$NPC_DISK_SYSLOG" &>/dev/null
+	else
+		cat &>>${NPC_DISK_LOG:-/dev/null}
+	fi )
