@@ -33,7 +33,21 @@ node_instance(){
 
 do_init() {
 	[ -x /usr/bin/curl ] || ( apt-get update && apt-get install -y curl ) >&2
+
+	[ ! -z "$NPC_INSTANCE_ID" ] && {
+		[ ! -z "$(node_instance "$HOSTNAME" | jq -r '.id//empty')" ] || {	
+			local LABELS=("npc.instance.id=$NPC_INSTANCE_ID")
+			[ ! -z "$NPC_INSTANCE_NAME" ] && LABELS=("${LABELS[@]}" "npc.instance.name=$NPC_INSTANCE_NAME")
+			[ ! -z "$NPC_INSTANCE_ZONE" ] && LABELS=("${LABELS[@]}" "npc.instance.zone=$NPC_INSTANCE_ZONE")
+			kubectl label node "$HOSTNAME" "${LABELS[@]}" >&2 
+		}
+	}
+	
 	[ ! -z "$NPC_DISK_RESOURCE_CAPACITY" ] && {
+		[ ! -z "$(node_instance "$HOSTNAME" | jq -r '.id//empty')" ] || {
+			jq -nc '{status:"Failure", message:"instance id not labeled"}'
+			return 1
+		}
 		kubectl get node "$HOSTNAME" -o json | jq -e '.status.capacity[env.NPC_DISK_RESOURCE]' >/dev/null || (
 			exec 100>"$SCRIPT_DIR/init.lock" && flock 100
 			kubectl get node "$HOSTNAME" -o json | jq -e '.status.capacity[env.NPC_DISK_RESOURCE]' >/dev/null || {

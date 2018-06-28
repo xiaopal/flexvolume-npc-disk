@@ -8,8 +8,8 @@ declare OPTIONS="$(jq -nc '{
         "kubernetes.io/pvOrVolumeName": "vol-test", 
         "kubernetes.io/fsType": "ext4" 
     }')" NODE="$(hostname)" INSTANCE='hzbdg-example-master'
-kubectl label node "$NODE" npc.instance.name=$INSTANCE npc.instance.id=863ff9dc-9820-4200-a940-5f4d707984d8 npc.instance.zone=cn-east-1b
 
+NPC_INSTANCE_NAME=$INSTANCE NPC_INSTANCE_ID=863ff9dc-9820-4200-a940-5f4d707984d8 NPC_INSTANCE_ZONE=cn-east-1b \
 plugins-exec/npc~disk/disk init
 plugins-exec/npc~disk/disk getvolumename "$OPTIONS"
 ATTACH_RESULT="$(plugins-exec/npc~disk/disk attach "$OPTIONS" "$NODE")" && jq -c . <<<"$ATTACH_RESULT"
