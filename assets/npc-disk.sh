@@ -221,10 +221,11 @@ do_mountdevice() {
 
 do_unmountdevice() {
 	local MOUNTPATH="$1"
-	! mountpoint -q "$MOUNTPATH" || umount ${MOUNTPATH} >&2 || {
+	! mountpoint -q "$MOUNTPATH" || umount "${MOUNTPATH}" >&2 || {
 		jq -nc '{status:"Failure", message:"failed to mount device"}'
 		return 1
 	}
+	rm -fr "${MOUNTPATH}"
 	jq -nc '{status:"Success"}'
 }
 
