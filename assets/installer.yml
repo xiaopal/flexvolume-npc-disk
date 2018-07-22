@@ -8,5 +8,7 @@
     - copy: src={{item}} dest={{plugin_dir}} mode='0755'
       with_items: 
         - /usr/bin/jq
+        - /usr/bin/dumb-init
         - /usr/npc-shell/npc-shell.sh
+        - do_init.sh
     - copy: src=npc-disk.sh dest={{plugin_dir}}/disk mode='0755'

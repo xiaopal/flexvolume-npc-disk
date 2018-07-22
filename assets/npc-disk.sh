@@ -24,40 +24,6 @@ node_instance(){
 		| with_entries(select(.key|startswith($prefix))|.key|=.[($prefix|length):])'
 }
 
-do_init() {
-	[ -x /usr/bin/curl ] || ( apt-get update && apt-get install -y curl ) >&2
-
-	[ ! -z "$NPC_INSTANCE_ID" ] && {
-		[ ! -z "$(node_instance "$HOSTNAME" | jq -r '.id//empty')" ] || {	
-			local LABELS=("npc.instance.id=$NPC_INSTANCE_ID")
-			[ ! -z "$NPC_INSTANCE_NAME" ] && LABELS=("${LABELS[@]}" "npc.instance.name=$NPC_INSTANCE_NAME")
-			[ ! -z "$NPC_INSTANCE_ZONE" ] && LABELS=("${LABELS[@]}" "npc.instance.zone=$NPC_INSTANCE_ZONE")
-			kubectl label node "$HOSTNAME" "${LABELS[@]}" >&2 
-		}
-	}
-	
-	[ ! -z "$NPC_DISK_RESOURCE_CAPACITY" ] && {
-		[ ! -z "$(node_instance "$HOSTNAME" | jq -r '.id//empty')" ] || {
-			jq -nc '{status:"Failure", message:"instance id not labeled"}'
-			return 1
-		}
-		kubectl get node "$HOSTNAME" -o json | jq -e '.status.capacity[env.NPC_DISK_RESOURCE]' >/dev/null || (
-			exec 100>"$SCRIPT_DIR/init.lock" && flock 100
-			kubectl get node "$HOSTNAME" -o json | jq -e '.status.capacity[env.NPC_DISK_RESOURCE]' >/dev/null || {
-				kubectl proxy -p 8888 & local KUBE_PROXY="$!" && sleep 1s
-				curl -sS -H "Content-Type: application/json-patch+json" -X PATCH \
-					-d "$(jq -nc '[{
-						op: "add", 
-						path: "/status/capacity/\(env.NPC_DISK_RESOURCE|gsub("/";"~1"))", 
-						value: (env.NPC_DISK_RESOURCE_CAPACITY|tonumber) }]')" \
-					"http://127.0.0.1:8888/api/v1/nodes/$HOSTNAME/status" | \
-					log "PATCH $HOSTNAME $NPC_DISK_RESOURCE=$(jq -r '.status.capacity[env.NPC_DISK_RESOURCE]')"
-				kill -TERM "$KUBE_PROXY" && wait
-			}>&2 )
-	}
-	jq -nc '{status:"Success", capabilities: {attach: true}}'	
-}
-
 find_disk(){
 	local DISK_NAME="$1" INSTANCE="$2" && [ ! -z "$DISK_NAME" ] || return 2
 	local ZONE="$([ ! -z "$INSTANCE" ] && jq -r '.zone//empty' <<<"$INSTANCE")"
@@ -224,21 +190,27 @@ do_unmountdevice() {
 
 {
 	log "$@"
-	if ACTION="do_$1" && shift && declare -F "$ACTION" >/dev/null; then
-		"$ACTION" "$@" || {
-			case "$?" in
-			1)
-				:
-				;;
-			*)
-				jq -nc '{status:"Failure", message:"Something wrong"}'
-				;;
-			esac
+	if ACTION="do_$1" && shift; then
+		if declare -F "$ACTION" >/dev/null; then
+			ACTION_CMD=("$ACTION" "$@")
+		elif [ -x "$SCRIPT_DIR/$ACTION.sh" ]; then
+			ACTION_CMD=("$SCRIPT_DIR/dumb-init" "$SCRIPT_DIR/$ACTION.sh" "$@")
+		else
+			jq -nc '{status:"Not supported"}'
+			exit 1	
+		fi
+		"${ACTION_CMD[@]}" || case "$?" in
+		1)
 			exit 1
-		}
+			;;
+		*)
+			jq -nc '{status:"Failure", message:"Something wrong"}'
+			exit 1
+			;;
+		esac
 	else
 		jq -nc '{status:"Not supported"}'
-		exit 1
+		exit 1	
 	fi
 } 2> >( if [ ! -z "$NPC_DISK_SYSLOG" ]; then
 		systemd-cat -t "$NPC_DISK_SYSLOG" &>/dev/null
